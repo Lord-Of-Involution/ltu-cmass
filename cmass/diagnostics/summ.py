@@ -438,9 +438,36 @@ def summarize_lightcone_pylians(
     rotmatrix = geom['rotation']
     pos = pos @ rotmatrix.T
 
-    # Center the box
-    pos = pos - geom['boxcenter'] + 0.5 * geom['boxsize']
-    L = geom['boxsize']
+    # Use one explicitly configured analysis cube when no-mask lightcones
+    # extend beyond the fitted survey geometry. The override is common across
+    # catalogues; per-catalogue dynamic boxes are intentionally unsupported.
+    fitted_box_size = float(geom['boxsize'])
+    fitted_box_center = np.asarray(geom['boxcenter'], dtype=np.float64)
+    configured_box_size = getattr(
+        config.diag, 'lightcone_box_size', None) if config is not None else None
+    configured_box_center = getattr(
+        config.diag, 'lightcone_box_center', None) if config is not None else None
+    if (configured_box_size is None) != (configured_box_center is None):
+        raise ValueError(
+            'diag.lightcone_box_size and diag.lightcone_box_center must be '
+            'set together.'
+        )
+    if configured_box_size is None:
+        L = fitted_box_size
+        box_center = fitted_box_center
+        box_policy = 'fitted_survey_geometry'
+    else:
+        L = float(configured_box_size)
+        box_center = np.asarray(configured_box_center, dtype=np.float64)
+        if L <= 0 or not np.isfinite(L):
+            raise ValueError(f'Invalid lightcone analysis box size: {L}')
+        if box_center.shape != (3,) or not np.all(np.isfinite(box_center)):
+            raise ValueError(
+                'diag.lightcone_box_center must contain three finite values.'
+            )
+        box_policy = 'configured_common_box'
+
+    pos = pos - box_center + 0.5 * L
 
     # Convert to float32
     pos = pos.astype(np.float32)
@@ -449,8 +476,10 @@ def summarize_lightcone_pylians(
     if np.any(pos < 0) or np.any(pos > L):
         logging.error('Error! Some tracers outside of box!')
         raise ValueError(
-            f'position out of bounds for {cap}_lightcone:\n'
-            f'\tmin={np.min(pos, axis=0)}\n\tmax={np.max(pos, axis=0)}')
+            f'position out of bounds for {cap}_lightcone using '
+            f'{box_policy}:\n'
+            f'\tmin={np.min(pos, axis=0)}\n\tmax={np.max(pos, axis=0)}\n'
+            f'\tbox_size={L}\n\tbox_center={box_center}')
 
     # Save metadata
     out_attrs = {}
@@ -464,6 +493,13 @@ def summarize_lightcone_pylians(
     out_attrs['catalog_source_path'] = os.path.abspath(filename)
     out_attrs['survey_geometry'] = cap
     out_attrs['survey_rotation_matrix'] = rotmatrix
+    out_attrs['lightcone_box_policy'] = box_policy
+    out_attrs['lightcone_fitted_box_size'] = fitted_box_size
+    out_attrs['lightcone_fitted_box_center'] = fitted_box_center
+    out_attrs['lightcone_analysis_box_size'] = L
+    out_attrs['lightcone_analysis_box_center'] = box_center
+    out_attrs['lightcone_analysis_position_min'] = np.min(pos, axis=0)
+    out_attrs['lightcone_analysis_position_max'] = np.max(pos, axis=0)
     out_attrs['geometry_los_axis'] = 0
     out_attrs['geometry_los_convention'] = \
         'representative LOS aligned with global x after survey rotation'
