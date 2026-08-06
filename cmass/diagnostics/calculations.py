@@ -16,14 +16,15 @@ from ..utils import timing_decorator
 #
 # K_MIN: set to ~k_F of the largest volume we use (3 Gpc/h → k_F ≈ 0.002),
 #   rounded up to 0.01 to exclude the noisiest large-scale modes.
-# DK_PK: dk=0.01 gives ~40 Pk bins (k_Nyq ≈ 0.40 is volume-independent),
-#   comfortably O(100).
+# DK_PK: dk=0.01 gives 79 Pk bins over [0.01, 0.80] h/Mpc for the
+#   high-resolution lightcone mesh.
 # DK_BK: dk=0.04 gives ~220 Bk triangles — chosen to keep the Bk data vector
 #   O(100-200). Finer bins (dk=0.02) give 1540 triangles, which is too large.
 # K_MAX_BK: 0.40 h/Mpc matches k_Nyquist for our standard mesh (N=128 per Gpc/h),
 #   so we use all available signal without extrapolating.
 K_MIN = 0.01    # h/Mpc, first bin edge
-DK_PK = 0.01   # h/Mpc, bin width for P(k)  → ~40 bins
+DK_PK = 0.01   # h/Mpc, bin width for P(k)  → 79 bins to K_MAX_PK
+K_MAX_PK = 0.80  # h/Mpc, fixed upper edge for lightcone P(k)
 DK_BK = 0.04   # h/Mpc, bin width for B(k)  → ~220 triangles
 K_MAX_BK = 0.40  # h/Mpc, hard kmax for B(k)
 
@@ -123,13 +124,27 @@ def calcPk_pypower_field(field, L, axis=0, MAS='CIC'):
     return poles.k, Pk, poles.nmodes
 
 
-def rebin_pk(k, Pk, Nmodes):
+def fixed_lightcone_pk_edges():
+    """Return the fixed 0.01--0.80 h/Mpc lightcone P(k) bin edges."""
+    n_bins_float = (K_MAX_PK - K_MIN) / DK_PK
+    n_bins = int(round(n_bins_float))
+    if not np.isclose(n_bins_float, n_bins):
+        raise ValueError(
+            'Lightcone P(k) range is not an integer multiple of DK_PK.'
+        )
+    edges = K_MIN + DK_PK * np.arange(n_bins + 1, dtype=np.float64)
+    edges[-1] = K_MAX_PK
+    return edges
+
+
+def rebin_pk(k, Pk, Nmodes, k_nyq):
     """Rebin pylians P(k) onto a fixed physical grid using mode-weighted averaging.
 
     Pylians bins at width k_F = 2pi/L, which varies with box size. This maps
-    those fine, volume-dependent bins onto a fixed grid (K_MIN, k_Nyq, DK_PK)
+    those fine, volume-dependent bins onto the fixed [0.01, 0.80] h/Mpc grid
     so that the output data vector has consistent meaning and length across
-    simulations of different volumes.
+    simulations of different volumes. The requested upper edge must not
+    exceed the mesh's one-dimensional Nyquist frequency.
 
     Within each output bin, modes are averaged weighted by Nmodes — the number
     of Fourier modes in each fine bin. This is the statistically correct weight:
@@ -142,21 +157,29 @@ def rebin_pk(k, Pk, Nmodes):
     where Pk_rebinned has shape (N_bins_coarse, n_ell). Output bins that
     contain no pylians modes are left as nan.
     """
-    k_nyq = k.max()
-    # Build fixed output bin edges and centers
-    n_bins = (k_nyq - K_MIN) // DK_PK
-    k_edges = np.append(K_MIN + DK_PK*np.arange(n_bins+1),
-                        k_nyq)   # last bin shorter
+    k = np.asarray(k)
+    Pk = np.asarray(Pk)
+    Nmodes = np.asarray(Nmodes)
+    k_edges = fixed_lightcone_pk_edges()
+    if k_edges[-1] > k_nyq + 1e-12:
+        raise ValueError(
+            f'Requested P(k) upper edge {k_edges[-1]:.6f} h/Mpc exceeds '
+            f'the mesh one-dimensional Nyquist {k_nyq:.6f} h/Mpc.'
+        )
     k_centers = 0.5 * (k_edges[:-1] + k_edges[1:])
     n_ell = Pk.shape[1] if Pk.ndim > 1 else 1
     Pk_out = np.full((len(k_centers), n_ell), np.nan)
     for i, (lo, hi) in enumerate(zip(k_edges[:-1], k_edges[1:])):
         # Select all pylians bins whose centers fall in this output bin
         mask = (k >= lo) & (k < hi)
+        if i == len(k_centers) - 1:
+            mask = (k >= lo) & (k <= hi)
         if not mask.any():
             continue
         # Weight by number of Fourier modes: more modes = lower variance = higher weight
         w = Nmodes[mask]
+        if np.sum(w) <= 0:
+            continue
         Pk_out[i] = np.average(Pk[mask], weights=w, axis=0)
     return k_centers, Pk_out
 

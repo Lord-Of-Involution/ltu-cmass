@@ -4,6 +4,8 @@ the simulation.
 """
 
 import os
+import importlib.metadata
+import json
 import numpy as np
 import logging
 from os.path import join
@@ -26,10 +28,39 @@ from .tools import (
 from .calculations import (
     MA, MAz, calcPk, rebin_pk, calcBk_bfast, calcBk_polybin,
     calcPk_pypower, calcPk_pypower_field, get_redshift_space_pos,
-    get_box_catalogue, get_box_catalogue_rsd  # not used
+    get_box_catalogue, get_box_catalogue_rsd, fixed_lightcone_pk_edges,
+    K_MIN, DK_PK, K_MAX_PK, DK_BK, K_MAX_BK
 )
 from .geometry import SURVEY_GEOMETRIES
 from ..survey.tools import sky_to_xyz
+
+
+def _source_revision_metadata():
+    repo_root = os.path.abspath(join(os.path.dirname(__file__), '..', '..'))
+    metadata = {}
+    for key, args in (
+        ('source_commit', ['rev-parse', 'HEAD']),
+        ('source_branch', ['rev-parse', '--abbrev-ref', 'HEAD']),
+    ):
+        try:
+            result = subprocess.run(
+                ['git', '-C', repo_root, *args], check=True,
+                capture_output=True, text=True
+            )
+            metadata[key] = result.stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            metadata[key] = 'unknown'
+    return metadata
+
+
+def _package_versions_json():
+    versions = {}
+    for distribution in ('numpy', 'h5py', 'Pylians3', 'PolyBin3D'):
+        try:
+            versions[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[distribution] = 'unknown'
+    return json.dumps(versions, sort_keys=True)
 
 
 def run_pylians(
@@ -39,7 +70,8 @@ def run_pylians(
     pfx = 'z' if use_rsd else ''
     k, Pk, Nmodes = calcPk(field, box_size, axis=axis,
                            MAS=MAS, threads=num_threads)
-    k, Pk = rebin_pk(k, Pk, Nmodes)
+    k_nyq = np.pi * field.shape[0] / box_size
+    k, Pk = rebin_pk(k, Pk, Nmodes, k_nyq=k_nyq)
     out = {
         pfx+'Pk_k3D': k,
         pfx+'Pk': Pk,
@@ -429,15 +461,48 @@ def summarize_lightcone_pylians(
     out_attrs['log10nbar'] = \
         np.log10(Ngalaxies) - 3 * np.log10(L)  # for numerical precision
     out_attrs['high_res'] = high_res and not use_ngp
+    out_attrs['catalog_source_path'] = os.path.abspath(filename)
+    out_attrs['survey_geometry'] = cap
+    out_attrs['survey_rotation_matrix'] = rotmatrix
+    out_attrs['geometry_los_axis'] = 0
+    out_attrs['geometry_los_convention'] = \
+        'representative LOS aligned with global x after survey rotation'
+    out_attrs.update(_source_revision_metadata())
+    out_attrs['package_versions'] = _package_versions_json()
 
     out_data = {}
     # Compute P(k)
-    # TODO: check the RSD axis=2 is okay
     if 'Pk' in summaries:
         N, MAS = get_mesh_resolution(L, high_res, use_ngp)
+        cell_size = L / N
+        k_nyq = np.pi / cell_size
+        k_edges = fixed_lightcone_pk_edges()
+        k_centers = 0.5 * (k_edges[:-1] + k_edges[1:])
+        if k_edges[-1] > k_nyq + 1e-12:
+            raise ValueError(
+                f'Requested P(k) upper edge {k_edges[-1]:.6f} h/Mpc '
+                f'exceeds the mesh one-dimensional Nyquist '
+                f'{k_nyq:.6f} h/Mpc.'
+            )
+        out_attrs.update({
+            'Pk_backend': 'pylians',
+            'Pk_los_axis': 0,
+            'Pk_los_convention': 'global x after survey rotation',
+            'Pk_mesh_shape': np.asarray([N, N, N], dtype=np.int64),
+            'Pk_cell_size': cell_size,
+            'Pk_nyquist_1d': k_nyq,
+            'Pk_MAS': MAS,
+            'Pk_kmin': K_MIN,
+            'Pk_dk': DK_PK,
+            'Pk_kmax': K_MAX_PK,
+            'Pk_k_edges': k_edges,
+            'Pk_k_centers': k_centers,
+            'Pk_num_bins': len(k_centers),
+            'Pk_bin_weighting': 'Pylians Nmodes weighted mean',
+        })
         field = MA(pos, L, N, MAS=MAS).astype(np.float32)
         out = run_pylians(
-            field, L, axis=2, MAS=MAS,
+            field, L, axis=0, MAS=MAS,
             num_threads=threads, use_rsd=False
         )
         out_data.update(out)
@@ -449,17 +514,31 @@ def summarize_lightcone_pylians(
         if config is not None:
             cache_dir = join(config.meta.wdir, 'scratch', 'cache')
 
+        cell_size = L / N
+        k_nyq = np.pi / cell_size
+        out_attrs.update({
+            'Bk_backend': config.diag.bispectrum_backend,
+            'Bk_los_axis': 2,
+            'Bk_los_convention': 'PolyBin internal global z axis',
+            'Bk_mesh_shape': np.asarray([N, N, N], dtype=np.int64),
+            'Bk_cell_size': cell_size,
+            'Bk_nyquist_1d': k_nyq,
+            'Bk_MAS': MAS,
+            'Bk_kmin': K_MIN,
+            'Bk_dk': DK_BK,
+            'Bk_kmax': K_MAX_BK,
+            'Q_definition': 'PolyBin reduced bispectrum monopole',
+            'Q_denominator': 'PolyBin internal P0 estimated from the same field',
+            'Q_discreteness_correction': True,
+        })
         field = MA(pos, L, N, MAS=MAS).astype(np.float32)
-        if config.diag.bispectrum_backend == 'polybin':
-            raise NotImplementedError(
-                'PolyBin bispectrum not yet implemented for lightcones.'
-            )
         out = run_bispectrum(
             field, L, axis=2, MAS=MAS,
             num_threads=threads, use_rsd=False,
             cache_dir=cache_dir,
             backend=config.diag.bispectrum_backend
         )
+        out_attrs['Bk_num_triangles'] = out['Bk_k123'].shape[-1]
         out_data.update(out)
 
     # Compute other summaries
