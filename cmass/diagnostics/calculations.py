@@ -6,7 +6,6 @@ import numpy as np
 import Pk_library as PKL
 import MAS_library as MASL
 import redshift_space_library as RSL
-import BFast
 import PolyBin3D as pb
 from ..utils import timing_decorator
 
@@ -250,6 +249,13 @@ def calcQk_bfast(Pk, Bk):
 
 @timing_decorator
 def calcBk_bfast(delta, L, axis=0, MAS='CIC', threads=16, cache_dir=None):
+    try:
+        import BFast
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            'The BFast package is required only when using the bfast backend.'
+        ) from error
+
     if cache_dir is None:
         cache_dir = './'
     else:
