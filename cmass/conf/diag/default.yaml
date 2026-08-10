@@ -36,6 +36,7 @@ summaries:
 
 # TODO: merge these?
 survey_backend: pypower  # backend for survey computations (pylians or pypower)
+periodic_backend: pypower  # backend for periodic P(k) (pylians or pypower)
 bispectrum_backend: polybin # backend for bispectrum computations (bfast or polybin)
 
 # Optional common lightcone analysis cube in the Cartesian frame after the

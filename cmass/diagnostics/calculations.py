@@ -15,15 +15,15 @@ from ..utils import timing_decorator
 #
 # K_MIN: set to ~k_F of the largest volume we use (3 Gpc/h → k_F ≈ 0.002),
 #   rounded up to 0.01 to exclude the noisiest large-scale modes.
-# DK_PK: dk=0.01 gives 79 Pk bins over [0.01, 0.80] h/Mpc for the
-#   high-resolution lightcone mesh.
+# DK_PK: dk=0.01 gives 79 Pk bins over [0.01, 0.80] h/Mpc for every
+#   high-resolution P(k) mesh used in this project.
 # DK_BK: dk=0.04 gives ~220 Bk triangles — chosen to keep the Bk data vector
 #   O(100-200). Finer bins (dk=0.02) give 1540 triangles, which is too large.
 # K_MAX_BK: 0.40 h/Mpc matches k_Nyquist for our standard mesh (N=128 per Gpc/h),
 #   so we use all available signal without extrapolating.
 K_MIN = 0.01    # h/Mpc, first bin edge
 DK_PK = 0.01   # h/Mpc, bin width for P(k)  → 79 bins to K_MAX_PK
-K_MAX_PK = 0.80  # h/Mpc, fixed upper edge for lightcone P(k)
+K_MAX_PK = 0.80  # h/Mpc, fixed upper edge for P(k)
 DK_BK = 0.04   # h/Mpc, bin width for B(k)  → ~220 triangles
 K_MAX_BK = 0.40  # h/Mpc, hard kmax for B(k)
 
@@ -57,15 +57,19 @@ def calcPk(delta, L, axis=0, MAS='CIC', threads=16):
 
 
 def _fixed_pk_kedges(k_nyq):
-    """The fixed (K_MIN, DK_PK) output grid, capped at a mesh's k_nyq.
+    """Return the fixed physical P(k) grid after checking mesh support.
 
-    Same grid `rebin_pk` rebins pylians onto -- built here directly so
-    pypower can bin straight onto it in one pass, instead of measuring on
-    pypower's own (much finer, k_F-spaced) bins and rebinning after.
+    Pypower bins directly onto the same grid used by ``rebin_pk``. The grid
+    must not be extended to the mesh Nyquist frequency because doing so would
+    create a volume-dependent final bin.
     """
-    n_bins = (k_nyq - K_MIN) // DK_PK
-    return np.append(K_MIN + DK_PK * np.arange(n_bins + 1),
-                     k_nyq)  # last bin shorter
+    k_edges = fixed_lightcone_pk_edges()
+    if k_edges[-1] > k_nyq + 1e-12:
+        raise ValueError(
+            f'Requested P(k) upper edge {k_edges[-1]:.6f} h/Mpc exceeds '
+            f'the mesh one-dimensional Nyquist {k_nyq:.6f} h/Mpc.'
+        )
+    return k_edges
 
 
 def calcPk_pypower(pos, L, N, axis=0, resampler='TSC', interlacing=2):
@@ -91,7 +95,8 @@ def calcPk_pypower(pos, L, N, axis=0, resampler='TSC', interlacing=2):
         poles(ell=0, complex=False, remove_shotnoise=False),
         poles(ell=2, complex=False),
         poles(ell=4, complex=False)], axis=-1)
-    return poles.k, Pk, poles.nmodes
+    k_centers = 0.5 * (kedges[:-1] + kedges[1:])
+    return k_centers, Pk, poles.nmodes
 
 
 def calcPk_pypower_field(field, L, axis=0, MAS='CIC'):
@@ -120,11 +125,12 @@ def calcPk_pypower_field(field, L, axis=0, MAS='CIC'):
         poles(ell=0, complex=False, remove_shotnoise=False),
         poles(ell=2, complex=False),
         poles(ell=4, complex=False)], axis=-1)
-    return poles.k, Pk, poles.nmodes
+    k_centers = 0.5 * (kedges[:-1] + kedges[1:])
+    return k_centers, Pk, poles.nmodes
 
 
 def fixed_lightcone_pk_edges():
-    """Return the fixed 0.01--0.80 h/Mpc lightcone P(k) bin edges."""
+    """Return the fixed 0.01--0.80 h/Mpc physical P(k) bin edges."""
     n_bins_float = (K_MAX_PK - K_MIN) / DK_PK
     n_bins = int(round(n_bins_float))
     if not np.isclose(n_bins_float, n_bins):

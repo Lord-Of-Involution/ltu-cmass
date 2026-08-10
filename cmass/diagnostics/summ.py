@@ -55,7 +55,9 @@ def _source_revision_metadata():
 
 def _package_versions_json():
     versions = {}
-    for distribution in ('numpy', 'h5py', 'Pylians3', 'PolyBin3D'):
+    for distribution in (
+        'numpy', 'h5py', 'pypower', 'pylians', 'PolyBin3D'
+    ):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -305,6 +307,10 @@ def summarize_tracer(
         out_attrs['log10nbar'] = \
             np.log10(Ngalaxies) - 3 * np.log10(L)  # for numerical precision
         out_attrs['high_res'] = high_res and not use_ngp
+        out_attrs['catalog_source_path'] = os.path.abspath(filename)
+        out_attrs['periodic_box_size'] = L
+        out_attrs.update(_source_revision_metadata())
+        out_attrs['package_versions'] = _package_versions_json()
 
         # Noise in-voxel
         if config.bias.hod.noise_uniform:
@@ -323,22 +329,75 @@ def summarize_tracer(
         out_data = {}
         if 'Pk' in summaries:
             N, MAS = get_mesh_resolution(L, high_res, use_ngp)
-
-            # real space
-            out = run_pypower_box(
-                pos, L, N, axis=2, MAS=MAS,
-                num_threads=threads, use_rsd=False
+            periodic_backend = getattr(
+                config.diag, 'periodic_backend', 'pypower'
             )
-            out_data.update(out)
+            cell_size = L / N
+            k_nyq = np.pi / cell_size
+            k_edges = fixed_lightcone_pk_edges()
+            k_centers = 0.5 * (k_edges[:-1] + k_edges[1:])
+            if k_edges[-1] > k_nyq + 1e-12:
+                raise ValueError(
+                    f'Requested P(k) upper edge {k_edges[-1]:.6f} h/Mpc '
+                    f'exceeds the mesh one-dimensional Nyquist '
+                    f'{k_nyq:.6f} h/Mpc.'
+                )
+            out_attrs.update({
+                'Pk_backend': periodic_backend,
+                'Pk_los_axis': 2,
+                'Pk_los_convention': 'periodic global z',
+                'Pk_mesh_shape': np.asarray([N, N, N], dtype=np.int64),
+                'Pk_cell_size': cell_size,
+                'Pk_nyquist_1d': k_nyq,
+                'Pk_MAS': MAS,
+                'Pk_kmin': K_MIN,
+                'Pk_dk': DK_PK,
+                'Pk_kmax': K_MAX_PK,
+                'Pk_k_edges': k_edges,
+                'Pk_k_centers': k_centers,
+                'Pk_num_bins': len(k_centers),
+            })
+            if periodic_backend == 'pylians':
+                out_attrs['Pk_interlacing'] = 0
+                out_attrs['Pk_bin_weighting'] = \
+                    'Pylians Nmodes weighted mean'
 
-            # redshift space
-            zpos = get_redshift_space_pos(
-                pos.copy(), vel.copy(), L, cosmo, z, axis=2)
-            out = run_pypower_box(
-                zpos, L, N, axis=2, MAS=MAS,
-                num_threads=threads, use_rsd=True
-            )
-            out_data.update(out)
+                field = MA(pos, L, N, MAS=MAS).astype(np.float32)
+                out = run_pylians(
+                    field, L, axis=2, MAS=MAS,
+                    num_threads=threads, use_rsd=False
+                )
+                out_data.update(out)
+
+                field = MAz(pos, vel, L, N, cosmo, z, MAS=MAS,
+                            axis=2).astype(np.float32)
+                out = run_pylians(
+                    field, L, axis=2, MAS=MAS,
+                    num_threads=threads, use_rsd=True
+                )
+                out_data.update(out)
+            elif periodic_backend == 'pypower':
+                out_attrs['Pk_interlacing'] = 2
+                out_attrs['Pk_bin_weighting'] = \
+                    'direct pypower physical bins'
+
+                out = run_pypower_box(
+                    pos, L, N, axis=2, MAS=MAS,
+                    num_threads=threads, use_rsd=False
+                )
+                out_data.update(out)
+
+                zpos = get_redshift_space_pos(
+                    pos.copy(), vel.copy(), L, cosmo, z, axis=2)
+                out = run_pypower_box(
+                    zpos, L, N, axis=2, MAS=MAS,
+                    num_threads=threads, use_rsd=True
+                )
+                out_data.update(out)
+            else:
+                raise ValueError(
+                    f'Unknown periodic backend: {periodic_backend}'
+                )
         # Compute B(k)
         if 'Bk' in summaries:
             # high-res takes too much memory
